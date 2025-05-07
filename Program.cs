@@ -59,7 +59,7 @@ class Program
             {
                 tasks.Add(Task.Run(() =>
                 {
-                    var tsContent = TypeScriptGenerator.Generate(node, tree);
+                    var tsContent = TypeScriptGenerator.Generate(node, tree, relativePath);
                     var targetPath = Path.Combine(outputRoot, Path.ChangeExtension(relativePath, ".ts"));
                     var targetDir = Path.GetDirectoryName(targetPath)!;
                     Directory.CreateDirectory(targetDir);
