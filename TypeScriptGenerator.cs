@@ -46,8 +46,7 @@ internal static class TypeScriptGenerator
         {
             var name = prop.Identifier.Text;
             var typeTs = MapType(prop.Type);
-            var optional = prop.Type is NullableTypeSyntax || prop.Type.ToString().EndsWith("?", StringComparison.Ordinal) ? "?" : string.Empty;
-            sb.AppendLine($"  {name}{optional}: {typeTs};");
+            sb.AppendLine($"  {name}: {typeTs};");
         }
         sb.AppendLine("}");
         return sb.ToString();
@@ -68,8 +67,21 @@ internal static class TypeScriptGenerator
 
     private static string MapType(TypeSyntax typeSyntax)
     {
+        var isNullable = false;
         var typeString = typeSyntax.ToString();
         var isArray = false;
+
+        // Handle nullable reference types and value types
+        if (typeSyntax is NullableTypeSyntax nullableType)
+        {
+            isNullable = true;
+            typeString = nullableType.ElementType.ToString();
+        }
+        else if (typeString.EndsWith("?", StringComparison.Ordinal))
+        {
+            isNullable = true;
+            typeString = typeString.Substring(0, typeString.Length - 1);
+        }
 
         if (typeString.EndsWith("[]", StringComparison.Ordinal))
         {
@@ -87,13 +99,13 @@ internal static class TypeScriptGenerator
             if (genericName is "List" or "IEnumerable" or "ICollection" or "IList" or "HashSet")
             {
                 var inner = MapType(SyntaxFactory.ParseTypeName(args[0].Trim()));
-                return $"{inner}[]";
+                return $"{inner}[]" + (isNullable ? " | null" : "");
             }
             if (genericName is "Dictionary" or "IDictionary")
             {
                 var key = MapType(SyntaxFactory.ParseTypeName(args[0].Trim()));
                 var val = MapType(SyntaxFactory.ParseTypeName(args[1].Trim()));
-                return $"Record<{key}, {val}>";
+                return $"Record<{key}, {val}>" + (isNullable ? " | null" : "");
             }
         }
 
@@ -101,6 +113,7 @@ internal static class TypeScriptGenerator
             typeString = mapped;
 
         if (isArray) typeString += "[]";
-        return typeString;
+        
+        return isNullable ? $"{typeString} | null" : typeString;
     }
 }
