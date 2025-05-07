@@ -45,6 +45,24 @@ class Program
                                                !p.EndsWith(".g.cs", StringComparison.OrdinalIgnoreCase));
 
         var tasks = new List<Task>();
+        // first pass: register all types and their eventual paths
+        foreach (var file in sourceFiles)
+        {
+            var relativePath = Path.GetRelativePath(projectRoot, file);
+            var fileText = await File.ReadAllTextAsync(file);
+            var tree = CSharpSyntaxTree.ParseText(fileText);
+            var root = await tree.GetRootAsync();
+
+            var convertNodes = root.DescendantNodes().OfType<BaseTypeDeclarationSyntax>()
+                                   .Where(n => HasConvertToTsAttribute(n.AttributeLists));
+            foreach(var node in convertNodes)
+            {
+                var tsRelPath = Path.ChangeExtension(relativePath, null).Replace('\\','/');
+                TypeScriptGenerator.RegisterType(node.Identifier.Text, tsRelPath);
+            }
+        }
+
+        // second pass: generate content
         foreach (var file in sourceFiles)
         {
             var relativePath = Path.GetRelativePath(projectRoot, file);

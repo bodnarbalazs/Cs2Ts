@@ -26,11 +26,21 @@ internal static class TypeScriptGenerator
 
     // Track imports needed for each file
     private static readonly Dictionary<string, HashSet<string>> ImportsNeeded = new();
+    // Map type name -> relative path (without extension) where it is declared
+    private static readonly Dictionary<string, string> TypeDeclarationPaths = new();
     
+    // Allows program to register all type names and their output paths before generation
+    public static void RegisterType(string typeName, string relativePath)
+    {
+        var key = relativePath.Replace('\\','/');
+        var noExt = System.IO.Path.ChangeExtension(key, null)?.Replace('\\','/') ?? key;
+        TypeDeclarationPaths[typeName] = noExt;
+    }
+
     public static string Generate(BaseTypeDeclarationSyntax node, SyntaxTree tree, string relativePath)
     {
         // Clear imports for this file
-        var fileKey = relativePath;
+        var fileKey = relativePath.Replace('\\','/');
         ImportsNeeded[fileKey] = new HashSet<string>();
         
         var result = node switch
@@ -49,7 +59,8 @@ internal static class TypeScriptGenerator
             var importSb = new StringBuilder();
             foreach (var import in ImportsNeeded[fileKey])
             {
-                importSb.AppendLine($"import {{ {import.Split('.').Last()} }} from './{import}';");
+                var importPath = BuildRelativeImportPath(fileKey, import);
+                importSb.AppendLine($"import {{ {import} }} from '{importPath}';");
             }
             importSb.AppendLine();
             return importSb.ToString() + result;
@@ -195,5 +206,53 @@ internal static class TypeScriptGenerator
         if (isArray) typeString += "[]";
         
         return isNullable ? $"{typeString} | null" : typeString;
+    }
+
+    // Calculate relative import path between current file and the file where the imported type is declared
+    private static string BuildRelativeImportPath(string currentFilePath, string importTypeName)
+    {
+        if(!TypeDeclarationPaths.TryGetValue(importTypeName, out var importPath))
+        {
+            // Fallback: same directory
+            return "./" + importTypeName;
+        }
+
+        // Remove extension from current file path
+        var currentDir = System.IO.Path.GetDirectoryName(currentFilePath)?.Replace('\\','/') ?? string.Empty;
+        var targetPath = importPath.Replace('\\','/');
+        var targetDir = System.IO.Path.GetDirectoryName(targetPath)?.Replace('\\','/') ?? string.Empty;
+
+        if(string.Equals(currentDir, targetDir, System.StringComparison.OrdinalIgnoreCase))
+        {
+            return "./" + System.IO.Path.GetFileName(targetPath);
+        }
+
+        var currentParts = currentDir.Split('/', System.StringSplitOptions.RemoveEmptyEntries);
+        var targetParts = targetDir.Split('/', System.StringSplitOptions.RemoveEmptyEntries);
+
+        int common = 0;
+        int min = System.Math.Min(currentParts.Length, targetParts.Length);
+        for(int i=0;i<min;i++)
+        {
+            if(string.Equals(currentParts[i], targetParts[i], System.StringComparison.OrdinalIgnoreCase))
+                common++;
+            else break;
+        }
+
+        var sb = new System.Text.StringBuilder();
+        for(int i=common;i<currentParts.Length;i++)
+        {
+            sb.Append("../");
+        }
+        for(int i=common;i<targetParts.Length;i++)
+        {
+            sb.Append(targetParts[i]);
+            sb.Append('/');
+        }
+        sb.Append(System.IO.Path.GetFileName(targetPath));
+        var rel = sb.ToString();
+        if(!rel.StartsWith("./") && !rel.StartsWith("../"))
+            rel = "./"+rel;
+        return rel;
     }
 }
