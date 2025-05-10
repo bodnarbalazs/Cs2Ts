@@ -187,7 +187,7 @@ internal static class TypeScriptGenerator
             {
                 var key = MapType(SyntaxFactory.ParseTypeName(args[0].Trim()), fileKey);
                 var val = MapType(SyntaxFactory.ParseTypeName(args[1].Trim()), fileKey);
-                return $"Record<{key}, {val}>" + (isNullable ? " | null" : "");
+                return $"Partial<Record<{key}, {val}>>" + (isNullable ? " | null" : "");
             }
         }
 
