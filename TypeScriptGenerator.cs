@@ -21,7 +21,8 @@ internal static class TypeScriptGenerator
         { "decimal", "number" },
         { "bool", "boolean" },
         { "DateTime", "Date" },
-        { "Guid", "string" }
+        { "Guid", "string" },
+        { "object", "any" }
     };
 
     // Track imports needed for each file
@@ -98,6 +99,11 @@ internal static class TypeScriptGenerator
         foreach (var prop in properties)
         {
             var name = prop.Identifier.Text;
+            // Convert to camelCase
+            if (!string.IsNullOrEmpty(name) && char.IsUpper(name[0]))
+            {
+                name = char.ToLower(name[0]) + name.Substring(1);
+            }
             var typeTs = MapType(prop.Type, fileKey);
             sb.AppendLine($"  {name}: {typeTs};");
         }
