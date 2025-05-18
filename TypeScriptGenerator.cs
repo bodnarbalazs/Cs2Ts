@@ -120,12 +120,8 @@ internal static class TypeScriptGenerator
         {
             foreach (var baseType in classDecl.BaseList.Types)
             {
-                // Skip interfaces, only include base classes
-                var typeName = baseType.Type.ToString();
-                if (!typeName.StartsWith("I") || !char.IsUpper(typeName[1]))
-                {
-                    baseTypes.Add(baseType.Type);
-                }
+                // Always add the base type, whether it's a class or an interface
+                baseTypes.Add(baseType.Type);
             }
         }
         else if (node is InterfaceDeclarationSyntax interfaceDecl && interfaceDecl.BaseList != null)
