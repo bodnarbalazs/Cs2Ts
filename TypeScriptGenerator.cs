@@ -38,7 +38,7 @@ internal static class TypeScriptGenerator
         TypeDeclarationPaths[typeName] = noExt;
     }
 
-    public static string Generate(BaseTypeDeclarationSyntax node, SyntaxTree tree, string relativePath)
+    public static string Generate(BaseTypeDeclarationSyntax node, SyntaxTree tree, SemanticModel semanticModel, string relativePath)
     {
         // Clear imports for this file
         var fileKey = relativePath.Replace('\\','/');
@@ -46,10 +46,10 @@ internal static class TypeScriptGenerator
         
         var result = node switch
         {
-            ClassDeclarationSyntax cls => GenerateInterface(cls, fileKey),
-            RecordDeclarationSyntax rec => GenerateInterface(rec, fileKey),
-            StructDeclarationSyntax st => GenerateInterface(st, fileKey),
-            InterfaceDeclarationSyntax iface => GenerateInterface(iface, fileKey),
+            ClassDeclarationSyntax cls => GenerateInterface(cls, fileKey, semanticModel),
+            RecordDeclarationSyntax rec => GenerateInterface(rec, fileKey, semanticModel),
+            StructDeclarationSyntax st => GenerateInterface(st, fileKey, semanticModel),
+            InterfaceDeclarationSyntax iface => GenerateInterface(iface, fileKey, semanticModel),
             EnumDeclarationSyntax @enum => GenerateEnum(@enum),
             _ => string.Empty
         };
@@ -70,7 +70,7 @@ internal static class TypeScriptGenerator
         return result;
     }
 
-    private static string GenerateInterface(BaseTypeDeclarationSyntax node, string fileKey)
+    private static string GenerateInterface(BaseTypeDeclarationSyntax node, string fileKey, SemanticModel semanticModel)
     {
         var properties = node.DescendantNodes().OfType<PropertyDeclarationSyntax>();
         var sb = new StringBuilder();
@@ -104,7 +104,43 @@ internal static class TypeScriptGenerator
             {
                 name = char.ToLower(name[0]) + name.Substring(1);
             }
-            var typeTs = MapType(prop.Type, fileKey);
+
+            string typeTs;
+            ExpressionSyntax? constantExpression = null;
+
+            if (prop.ExpressionBody != null) // e.g. public T Prop => expression;
+            {
+                constantExpression = prop.ExpressionBody.Expression;
+            }
+            else if (prop.AccessorList != null) // e.g. public T Prop { get => expression; }
+            {
+                var getter = prop.AccessorList.Accessors
+                    .FirstOrDefault(acc => acc.IsKind(SyntaxKind.GetAccessorDeclaration) && acc.ExpressionBody != null);
+                if (getter != null && getter.ExpressionBody != null)
+                {
+                    constantExpression = getter.ExpressionBody.Expression;
+                }
+            }
+
+            if (constantExpression != null)
+            {
+                string? literalType = TryGetLiteralType(constantExpression, fileKey, semanticModel);
+                if (literalType != null)
+                {
+                    typeTs = literalType;
+                }
+                else
+                {
+                    // Fallback if expression is too complex or not a recognized literal/enum
+                    typeTs = MapType(prop.Type, fileKey);
+                }
+            }
+            else
+            {
+                // Standard property (get; set; or get with block body)
+                typeTs = MapType(prop.Type, fileKey);
+            }
+            
             sb.AppendLine($"  {name}: {typeTs};");
         }
         
@@ -256,5 +292,40 @@ internal static class TypeScriptGenerator
         if(!rel.StartsWith("./") && !rel.StartsWith("../"))
             rel = "./"+rel;
         return rel;
+    }
+
+    private static string? TryGetLiteralType(ExpressionSyntax expression, string fileKey, SemanticModel semanticModel)
+    {
+        if (expression is MemberAccessExpressionSyntax memberAccess) // e.g., MyEnum.Value
+        {
+            var symbolInfo = semanticModel.GetSymbolInfo(memberAccess);
+            if (symbolInfo.Symbol is IFieldSymbol fieldSymbol && fieldSymbol.ContainingType.TypeKind == TypeKind.Enum)
+            {
+                var enumTypeName = fieldSymbol.ContainingType.Name;
+                var enumMemberName = fieldSymbol.Name;
+
+                if (TypeDeclarationPaths.ContainsKey(enumTypeName))
+                {
+                    ImportsNeeded[fileKey].Add(enumTypeName);
+                }
+                return $"{enumTypeName}.{enumMemberName}";
+            }
+        }
+        else if (expression is LiteralExpressionSyntax literal)
+        {
+            switch (literal.Kind())
+            {
+                case SyntaxKind.StringLiteralExpression:
+                    return literal.Token.Text; // Includes quotes, e.g., "\"text\""
+                case SyntaxKind.NumericLiteralExpression:
+                    return literal.Token.Text; // e.g., "123"
+                case SyntaxKind.TrueLiteralExpression:
+                    return "true";
+                case SyntaxKind.FalseLiteralExpression:
+                    return "false";
+                // Potentially handle SyntaxKind.NullLiteralExpression -> "null"
+            }
+        }
+        return null; // Not a recognized literal type
     }
 }
