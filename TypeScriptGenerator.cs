@@ -22,7 +22,7 @@ internal static class TypeScriptGenerator
         { "bool", "boolean" },
         { "DateTime", "Date" },
         { "Guid", "string" },
-        { "object", "any" }
+        { "object", "unknown" }
     };
 
     // Track imports needed for each file
