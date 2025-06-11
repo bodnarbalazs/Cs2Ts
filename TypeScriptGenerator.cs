@@ -14,7 +14,9 @@ internal static class TypeScriptGenerator
     {
         { "string", "string" },
         { "int", "number" },
+        { "uint", "number" },
         { "long", "number" },
+        { "ulong", "number" },
         { "short", "number" },
         { "float", "number" },
         { "double", "number" },
