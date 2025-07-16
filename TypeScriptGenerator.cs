@@ -55,6 +55,9 @@ internal static class TypeScriptGenerator
             EnumDeclarationSyntax @enum => GenerateEnum(@enum),
             _ => string.Empty
         };
+
+        // Remove self-import to avoid importing the type from its own file
+        ImportsNeeded[fileKey].Remove(node.Identifier.Text);
         
         // Add imports if needed
         if (ImportsNeeded[fileKey].Count > 0)
