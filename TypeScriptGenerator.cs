@@ -29,6 +29,8 @@ internal static class TypeScriptGenerator
 
     // Track imports needed for each file
     private static readonly Dictionary<string, HashSet<string>> ImportsNeeded = new();
+    // Track React imports needed for each file
+    private static readonly Dictionary<string, HashSet<string>> ReactImportsNeeded = new();
     // Map type name -> relative path (without extension) where it is declared
     private static readonly Dictionary<string, string> TypeDeclarationPaths = new();
     
@@ -45,6 +47,7 @@ internal static class TypeScriptGenerator
         // Clear imports for this file
         var fileKey = relativePath.Replace('\\','/');
         ImportsNeeded[fileKey] = new HashSet<string>();
+        ReactImportsNeeded[fileKey] = new HashSet<string>();
         
         var result = node switch
         {
@@ -69,7 +72,19 @@ internal static class TypeScriptGenerator
                 importSb.AppendLine($"import {{ {import} }} from '{importPath}';");
             }
             importSb.AppendLine();
-            return importSb.ToString() + result;
+            result = importSb.ToString() + result;
+        }
+        
+        // Add React imports if needed
+        if (ReactImportsNeeded[fileKey].Count > 0)
+        {
+            var reactImportSb = new StringBuilder();
+            foreach (var import in ReactImportsNeeded[fileKey])
+            {
+                reactImportSb.AppendLine($"import {{ {import} }} from 'react';");
+            }
+            reactImportSb.AppendLine();
+            result = reactImportSb.ToString() + result;
         }
         
         return result;
@@ -113,6 +128,10 @@ internal static class TypeScriptGenerator
             string typeTs;
             ExpressionSyntax? constantExpression = null;
 
+            // Check for special attributes on the property
+            bool hasReactNodeAttribute = HasAttribute(prop.AttributeLists, "ReactNode");
+            bool hasHtmlElementAttribute = HasAttribute(prop.AttributeLists, "HtmlElement");
+
             if (prop.ExpressionBody != null) // e.g. public T Prop => expression;
             {
                 constantExpression = prop.ExpressionBody.Expression;
@@ -144,6 +163,16 @@ internal static class TypeScriptGenerator
             {
                 // Standard property (get; set; or get with block body)
                 typeTs = MapType(prop.Type, fileKey);
+            }
+            
+            if (hasReactNodeAttribute)
+            {
+                typeTs = "ReactNode";
+                ReactImportsNeeded[fileKey].Add("ReactNode");
+            }
+            else if (hasHtmlElementAttribute)
+            {
+                typeTs = "HTMLElement";
             }
             
             sb.AppendLine($"  {name}: {typeTs};");
@@ -221,6 +250,46 @@ internal static class TypeScriptGenerator
             var genericName = typeString.Substring(0, start).Trim();
             var innerPart = typeString.Substring(start + 1, end - start - 1);
             var args = innerPart.Split(',');
+            
+            // Handle Action and Func types
+            if (genericName == "Action")
+            {
+                if (args.Length == 1)
+                {
+                    var argType = MapType(SyntaxFactory.ParseTypeName(args[0].Trim()), fileKey);
+                    return $"(arg: {argType}) => void" + (isNullable ? " | null" : "");
+                }
+                else if (args.Length == 2)
+                {
+                    var arg1Type = MapType(SyntaxFactory.ParseTypeName(args[0].Trim()), fileKey);
+                    var arg2Type = MapType(SyntaxFactory.ParseTypeName(args[1].Trim()), fileKey);
+                    return $"(arg1: {arg1Type}, arg2: {arg2Type}) => void" + (isNullable ? " | null" : "");
+                }
+                // Add more overloads as needed
+            }
+            else if (genericName == "Func")
+            {
+                if (args.Length == 1)
+                {
+                    var returnType = MapType(SyntaxFactory.ParseTypeName(args[0].Trim()), fileKey);
+                    return $"() => {returnType}" + (isNullable ? " | null" : "");
+                }
+                else if (args.Length == 2)
+                {
+                    var argType = MapType(SyntaxFactory.ParseTypeName(args[0].Trim()), fileKey);
+                    var returnType = MapType(SyntaxFactory.ParseTypeName(args[1].Trim()), fileKey);
+                    return $"(arg: {argType}) => {returnType}" + (isNullable ? " | null" : "");
+                }
+                else if (args.Length == 3)
+                {
+                    var arg1Type = MapType(SyntaxFactory.ParseTypeName(args[0].Trim()), fileKey);
+                    var arg2Type = MapType(SyntaxFactory.ParseTypeName(args[1].Trim()), fileKey);
+                    var returnType = MapType(SyntaxFactory.ParseTypeName(args[2].Trim()), fileKey);
+                    return $"(arg1: {arg1Type}, arg2: {arg2Type}) => {returnType}" + (isNullable ? " | null" : "");
+                }
+                // Add more overloads as needed
+            }
+            
             if (genericName is "List" or "IEnumerable" or "ICollection" or "IList" or "HashSet")
             {
                 var inner = MapType(SyntaxFactory.ParseTypeName(args[0].Trim()), fileKey);
@@ -232,6 +301,12 @@ internal static class TypeScriptGenerator
                 var val = MapType(SyntaxFactory.ParseTypeName(args[1].Trim()), fileKey);
                 return $"Partial<Record<{key}, {val}>>" + (isNullable ? " | null" : "");
             }
+        }
+
+        // Handle non-generic Action
+        if (typeString == "Action")
+        {
+            return "() => void" + (isNullable ? " | null" : "");
         }
 
         // Check if it's a primitive type
@@ -249,6 +324,22 @@ internal static class TypeScriptGenerator
         if (isArray) typeString += "[]";
         
         return isNullable ? $"{typeString} | null" : typeString;
+    }
+
+    private static bool HasAttribute(SyntaxList<AttributeListSyntax> attributeLists, string attributeName)
+    {
+        foreach (var attributeList in attributeLists)
+        {
+            foreach (var attribute in attributeList.Attributes)
+            {
+                var name = attribute.Name.ToString();
+                if (name == attributeName || name == attributeName + "Attribute")
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     // Calculate relative import path between current file and the file where the imported type is declared

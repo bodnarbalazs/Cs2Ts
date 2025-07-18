@@ -4,3 +4,13 @@ namespace Cs2Ts;
 public sealed class ConvertToTsAttribute : System.Attribute
 {
 }
+
+[System.AttributeUsage(System.AttributeTargets.Property)]
+public sealed class ReactNodeAttribute : System.Attribute
+{
+}
+
+[System.AttributeUsage(System.AttributeTargets.Property)]
+public sealed class HtmlElementAttribute : System.Attribute
+{
+}
