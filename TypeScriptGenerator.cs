@@ -51,7 +51,9 @@ internal static class TypeScriptGenerator
         
         var result = node switch
         {
-            ClassDeclarationSyntax cls => GenerateInterface(cls, fileKey, semanticModel),
+            ClassDeclarationSyntax cls => cls.Modifiers.Any(SyntaxKind.StaticKeyword)
+                ? GenerateStaticClassConstants(cls, fileKey, semanticModel)
+                : GenerateInterface(cls, fileKey, semanticModel),
             RecordDeclarationSyntax rec => GenerateInterface(rec, fileKey, semanticModel),
             StructDeclarationSyntax st => GenerateInterface(st, fileKey, semanticModel),
             InterfaceDeclarationSyntax iface => GenerateInterface(iface, fileKey, semanticModel),
@@ -88,6 +90,38 @@ internal static class TypeScriptGenerator
         }
         
         return result;
+    }
+
+    private static string GenerateStaticClassConstants(ClassDeclarationSyntax cls, string fileKey, SemanticModel semanticModel)
+    {
+        // Export each static readonly/const field that has an initializer as a TS const
+        var sb = new StringBuilder();
+        var fields = cls.Members.OfType<FieldDeclarationSyntax>()
+            .Where(f => f.Modifiers.Any(SyntaxKind.StaticKeyword) && (f.Modifiers.Any(SyntaxKind.ReadOnlyKeyword) || f.Modifiers.Any(SyntaxKind.ConstKeyword)));
+
+        foreach (var field in fields)
+        {
+            // Map declared type
+            var tsType = MapType(field.Declaration.Type, fileKey);
+
+            foreach (var variable in field.Declaration.Variables)
+            {
+                if (variable.Initializer == null) continue; // skip if no initializer
+
+                var name = variable.Identifier.Text;
+                var expr = variable.Initializer.Value;
+                var tsExpr = TryTranslateExpressionToTs(expr, fileKey, semanticModel);
+                if (tsExpr == null)
+                {
+                    // Fallback: skip if we cannot translate expression safely
+                    continue;
+                }
+
+                sb.AppendLine($"export const {name}: {tsType} = {tsExpr};");
+            }
+        }
+
+        return sb.ToString();
     }
 
     private static string GenerateInterface(BaseTypeDeclarationSyntax node, string fileKey, SemanticModel semanticModel)
@@ -423,5 +457,108 @@ internal static class TypeScriptGenerator
             }
         }
         return null; // Not a recognized literal type
+    }
+
+    private static string? TryTranslateExpressionToTs(ExpressionSyntax expression, string fileKey, SemanticModel semanticModel)
+    {
+        // Enum member or literal
+        var literal = TryGetLiteralType(expression, fileKey, semanticModel);
+        if (literal != null)
+            return literal;
+
+        // Handle parenthesized
+        if (expression is ParenthesizedExpressionSyntax paren && paren.Expression != null)
+        {
+            var inner = TryTranslateExpressionToTs(paren.Expression, fileKey, semanticModel);
+            return inner != null ? $"({inner})" : null;
+        }
+
+        // Handle unary minus for numbers
+        if (expression is PrefixUnaryExpressionSyntax prefix && prefix.OperatorToken.IsKind(SyntaxKind.MinusToken))
+        {
+            var inner = TryTranslateExpressionToTs(prefix.Operand, fileKey, semanticModel);
+            return inner != null ? "-" + inner : null;
+        }
+
+        // Handle array creation with initializer: new T[] { ... }
+        if (expression is ArrayCreationExpressionSyntax arrayCreation && arrayCreation.Initializer != null)
+        {
+            var items = new List<string>();
+            foreach (var expr in arrayCreation.Initializer.Expressions)
+            {
+                var item = TryTranslateExpressionToTs(expr, fileKey, semanticModel);
+                if (item == null) return null;
+                items.Add(item);
+            }
+            return "[" + string.Join(", ", items) + "]";
+        }
+
+        // Handle implicit array creation: new[] { ... }
+        if (expression is ImplicitArrayCreationExpressionSyntax implicitArray && implicitArray.Initializer != null)
+        {
+            var items = new List<string>();
+            foreach (var expr in implicitArray.Initializer.Expressions)
+            {
+                var item = TryTranslateExpressionToTs(expr, fileKey, semanticModel);
+                if (item == null) return null;
+                items.Add(item);
+            }
+            return "[" + string.Join(", ", items) + "]";
+        }
+
+        // Handle collection expressions: [ a, b, c ] (C# 12)
+        if (expression is CollectionExpressionSyntax collectionExpr)
+        {
+            var items = new List<string>();
+            foreach (var element in collectionExpr.Elements)
+            {
+                if (element is ExpressionElementSyntax ee)
+                {
+                    var item = TryTranslateExpressionToTs(ee.Expression, fileKey, semanticModel);
+                    if (item == null) return null;
+                    items.Add(item);
+                }
+                else if (element is SpreadElementSyntax se)
+                {
+                    var spread = TryTranslateExpressionToTs(se.Expression, fileKey, semanticModel);
+                    if (spread == null) return null;
+                    items.Add("..." + spread);
+                }
+                else
+                {
+                    return null; // unsupported element type
+                }
+            }
+            return "[" + string.Join(", ", items) + "]";
+        }
+
+        // Handle object/collection initializer: new List<T> { ... }
+        if (expression is ObjectCreationExpressionSyntax objCreate && objCreate.Initializer != null)
+        {
+            var items = new List<string>();
+            foreach (var expr in objCreate.Initializer.Expressions)
+            {
+                var item = TryTranslateExpressionToTs(expr, fileKey, semanticModel);
+                if (item == null) return null;
+                items.Add(item);
+            }
+            return "[" + string.Join(", ", items) + "]";
+        }
+
+        // Fallback: try simple identifier referencing an enum member without dot (unlikely) or const
+        if (expression is IdentifierNameSyntax id)
+        {
+            var symbol = semanticModel.GetSymbolInfo(id).Symbol;
+            if (symbol is IFieldSymbol fs && fs.IsConst)
+            {
+                // For consts, attempt to get constant value
+                var constVal = fs.ConstantValue;
+                if (constVal is string s) return "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+                if (constVal is bool b) return b ? "true" : "false";
+                if (constVal != null) return constVal.ToString();
+            }
+        }
+
+        return null; // unsupported expression
     }
 }
