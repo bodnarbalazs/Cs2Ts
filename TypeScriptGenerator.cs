@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text;
+using System.Xml.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -33,6 +35,7 @@ internal static class TypeScriptGenerator
     private static readonly Dictionary<string, HashSet<string>> ReactImportsNeeded = new();
     // Map type name -> relative path (without extension) where it is declared
     private static readonly Dictionary<string, string> TypeDeclarationPaths = new();
+    private static readonly TextInfo InvariantTextInfo = CultureInfo.InvariantCulture.TextInfo;
     
     // Allows program to register all type names and their output paths before generation
     public static void RegisterType(string typeName, string relativePath)
@@ -53,7 +56,7 @@ internal static class TypeScriptGenerator
         {
             ClassDeclarationSyntax cls => cls.Modifiers.Any(SyntaxKind.StaticKeyword)
                 ? GenerateStaticClassConstants(cls, fileKey, semanticModel)
-                : GenerateInterface(cls, fileKey, semanticModel),
+                : GenerateClass(cls, fileKey, semanticModel),
             RecordDeclarationSyntax rec => GenerateInterface(rec, fileKey, semanticModel),
             StructDeclarationSyntax st => GenerateInterface(st, fileKey, semanticModel),
             InterfaceDeclarationSyntax iface => GenerateInterface(iface, fileKey, semanticModel),
@@ -92,42 +95,78 @@ internal static class TypeScriptGenerator
         return result;
     }
 
+    private static string GenerateClass(ClassDeclarationSyntax cls, string fileKey, SemanticModel semanticModel)
+    {
+        var interfaceContent = GenerateInterface(cls, fileKey, semanticModel);
+
+        var staticFields = cls.Members.OfType<FieldDeclarationSyntax>()
+            .Where(f => f.Modifiers.Any(SyntaxKind.StaticKeyword) && (f.Modifiers.Any(SyntaxKind.ReadOnlyKeyword) || f.Modifiers.Any(SyntaxKind.ConstKeyword)));
+
+        var staticExports = GenerateStaticFieldExports(staticFields, fileKey, semanticModel);
+
+        if (string.IsNullOrWhiteSpace(staticExports))
+        {
+            return interfaceContent;
+        }
+
+        return interfaceContent + System.Environment.NewLine + staticExports;
+    }
+
     private static string GenerateStaticClassConstants(ClassDeclarationSyntax cls, string fileKey, SemanticModel semanticModel)
     {
-        // Export each static readonly/const field that has an initializer as a TS const
-        var sb = new StringBuilder();
         var fields = cls.Members.OfType<FieldDeclarationSyntax>()
             .Where(f => f.Modifiers.Any(SyntaxKind.StaticKeyword) && (f.Modifiers.Any(SyntaxKind.ReadOnlyKeyword) || f.Modifiers.Any(SyntaxKind.ConstKeyword)));
 
+        return GenerateStaticFieldExports(fields, fileKey, semanticModel);
+    }
+
+    private static string GenerateStaticFieldExports(IEnumerable<FieldDeclarationSyntax> fields, string fileKey, SemanticModel semanticModel)
+    {
+        var exportBlocks = new List<string>();
+
         foreach (var field in fields)
         {
-            // Map declared type
             var tsType = MapType(field.Declaration.Type, fileKey);
 
             foreach (var variable in field.Declaration.Variables)
             {
-                if (variable.Initializer == null) continue; // skip if no initializer
+                if (variable.Initializer == null) continue;
 
-                var name = variable.Identifier.Text;
-                var expr = variable.Initializer.Value;
-                var tsExpr = TryTranslateExpressionToTs(expr, fileKey, semanticModel);
-                if (tsExpr == null)
+                var tsExpr = TryTranslateExpressionToTs(variable.Initializer.Value, fileKey, semanticModel);
+                if (tsExpr == null) continue;
+
+                var blockBuilder = new StringBuilder();
+                var symbol = semanticModel.GetDeclaredSymbol(variable);
+                var docComment = GetJsDocComment(symbol);
+                if (!string.IsNullOrWhiteSpace(docComment))
                 {
-                    // Fallback: skip if we cannot translate expression safely
-                    continue;
+                    blockBuilder.AppendLine(docComment);
                 }
 
-                sb.AppendLine($"export const {name}: {tsType} = {tsExpr};");
+                blockBuilder.Append($"export const {variable.Identifier.Text}: {tsType} = {tsExpr};");
+                exportBlocks.Add(blockBuilder.ToString().TrimEnd());
             }
         }
 
-        return sb.ToString();
+        if (exportBlocks.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        return string.Join(System.Environment.NewLine + System.Environment.NewLine, exportBlocks);
     }
 
     private static string GenerateInterface(BaseTypeDeclarationSyntax node, string fileKey, SemanticModel semanticModel)
     {
         var properties = node.DescendantNodes().OfType<PropertyDeclarationSyntax>();
         var sb = new StringBuilder();
+
+        var typeSymbol = semanticModel.GetDeclaredSymbol(node);
+        var typeDocComment = GetJsDocComment(typeSymbol);
+        if (!string.IsNullOrWhiteSpace(typeDocComment))
+        {
+            sb.AppendLine(typeDocComment);
+        }
         
         // Handle inheritance
         var baseTypes = GetBaseTypes(node);
@@ -152,12 +191,7 @@ internal static class TypeScriptGenerator
         
         foreach (var prop in properties)
         {
-            var name = prop.Identifier.Text;
-            // Convert to camelCase
-            if (!string.IsNullOrEmpty(name) && char.IsUpper(name[0]))
-            {
-                name = char.ToLower(name[0]) + name.Substring(1);
-            }
+            var name = ToCamelCase(prop.Identifier.Text);
 
             string typeTs;
             ExpressionSyntax? constantExpression = null;
@@ -207,6 +241,13 @@ internal static class TypeScriptGenerator
             else if (hasHtmlElementAttribute)
             {
                 typeTs = "HTMLElement";
+            }
+
+            var propertySymbol = semanticModel.GetDeclaredSymbol(prop);
+            var propertyDocComment = GetJsDocComment(propertySymbol);
+            if (!string.IsNullOrWhiteSpace(propertyDocComment))
+            {
+                sb.AppendLine(IndentJsDoc(propertyDocComment, "  "));
             }
             
             sb.AppendLine($"  {name}: {typeTs};");
@@ -483,27 +524,13 @@ internal static class TypeScriptGenerator
         // Handle array creation with initializer: new T[] { ... }
         if (expression is ArrayCreationExpressionSyntax arrayCreation && arrayCreation.Initializer != null)
         {
-            var items = new List<string>();
-            foreach (var expr in arrayCreation.Initializer.Expressions)
-            {
-                var item = TryTranslateExpressionToTs(expr, fileKey, semanticModel);
-                if (item == null) return null;
-                items.Add(item);
-            }
-            return "[" + string.Join(", ", items) + "]";
+            return TranslateArrayInitializer(arrayCreation.Initializer, fileKey, semanticModel);
         }
 
         // Handle implicit array creation: new[] { ... }
         if (expression is ImplicitArrayCreationExpressionSyntax implicitArray && implicitArray.Initializer != null)
         {
-            var items = new List<string>();
-            foreach (var expr in implicitArray.Initializer.Expressions)
-            {
-                var item = TryTranslateExpressionToTs(expr, fileKey, semanticModel);
-                if (item == null) return null;
-                items.Add(item);
-            }
-            return "[" + string.Join(", ", items) + "]";
+            return TranslateArrayInitializer(implicitArray.Initializer, fileKey, semanticModel);
         }
 
         // Handle collection expressions: [ a, b, c ] (C# 12)
@@ -532,17 +559,14 @@ internal static class TypeScriptGenerator
             return "[" + string.Join(", ", items) + "]";
         }
 
-        // Handle object/collection initializer: new List<T> { ... }
-        if (expression is ObjectCreationExpressionSyntax objCreate && objCreate.Initializer != null)
+        if (expression is ObjectCreationExpressionSyntax objectCreation)
         {
-            var items = new List<string>();
-            foreach (var expr in objCreate.Initializer.Expressions)
-            {
-                var item = TryTranslateExpressionToTs(expr, fileKey, semanticModel);
-                if (item == null) return null;
-                items.Add(item);
-            }
-            return "[" + string.Join(", ", items) + "]";
+            return TranslateObjectCreation(objectCreation, fileKey, semanticModel);
+        }
+
+        if (expression is ImplicitObjectCreationExpressionSyntax implicitObjectCreation)
+        {
+            return TranslateObjectCreation(implicitObjectCreation, fileKey, semanticModel);
         }
 
         // Fallback: try simple identifier referencing an enum member without dot (unlikely) or const
@@ -560,5 +584,190 @@ internal static class TypeScriptGenerator
         }
 
         return null; // unsupported expression
+    }
+
+    private static string? TranslateObjectCreation(BaseObjectCreationExpressionSyntax objectCreation, string fileKey, SemanticModel semanticModel)
+    {
+        if (objectCreation.Initializer == null)
+        {
+            return "{}";
+        }
+
+        if (objectCreation.Initializer.Expressions.All(e => e is AssignmentExpressionSyntax))
+        {
+            return TranslateObjectInitializer(objectCreation.Initializer, fileKey, semanticModel);
+        }
+
+        // Collection initializer fallback
+        return TranslateArrayInitializer(objectCreation.Initializer, fileKey, semanticModel);
+    }
+
+    private static string? TranslateArrayInitializer(InitializerExpressionSyntax initializer, string fileKey, SemanticModel semanticModel)
+    {
+        var items = new List<string>();
+        foreach (var expr in initializer.Expressions)
+        {
+            var item = TryTranslateExpressionToTs(expr, fileKey, semanticModel);
+            if (item == null) return null;
+            items.Add(item);
+        }
+        return "[" + string.Join(", ", items) + "]";
+    }
+
+    private static string? TranslateObjectInitializer(InitializerExpressionSyntax initializer, string fileKey, SemanticModel semanticModel)
+    {
+        var properties = new List<string>();
+        foreach (var expr in initializer.Expressions)
+        {
+            if (expr is not AssignmentExpressionSyntax assignment) return null;
+
+            var propertyName = assignment.Left switch
+            {
+                IdentifierNameSyntax ident => ident.Identifier.Text,
+                SimpleNameSyntax simple => simple.Identifier.Text,
+                MemberAccessExpressionSyntax memberAccess => memberAccess.Name.Identifier.Text,
+                _ => assignment.Left.ToString()
+            };
+
+            propertyName = propertyName.TrimStart('@');
+            var tsPropertyName = ToCamelCase(propertyName);
+
+            var valueTs = TryTranslateExpressionToTs(assignment.Right, fileKey, semanticModel);
+            if (valueTs == null) return null;
+
+            if (valueTs.Contains('\n'))
+            {
+                valueTs = IndentMultiline(valueTs, "    ");
+            }
+
+            properties.Add($"  {tsPropertyName}: {valueTs}");
+        }
+
+        if (properties.Count == 0)
+        {
+            return "{}";
+        }
+
+        return "{\n" + string.Join(",\n", properties) + "\n}";
+    }
+
+    private static string ToCamelCase(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return name;
+        if (name.Length == 1) return InvariantTextInfo.ToLower(name);
+
+        if (char.IsUpper(name[0]))
+        {
+            if (name.Length > 1 && char.IsUpper(name[1]))
+            {
+                // Preserve acronyms (e.g., URLBuilder -> urlBuilder)
+                var index = 1;
+                while (index < name.Length && char.IsUpper(name[index]))
+                {
+                    index++;
+                }
+                var leading = name.Substring(0, index - 1);
+                var rest = name.Substring(index - 1);
+                return InvariantTextInfo.ToLower(leading) + rest;
+            }
+
+            return char.ToLowerInvariant(name[0]) + name.Substring(1);
+        }
+
+        return name;
+    }
+
+    private static string IndentMultiline(string value, string indent)
+    {
+        var lines = value.Replace("\r\n", "\n").Split('\n');
+        if (lines.Length <= 1) return value;
+
+        var sb = new StringBuilder();
+        sb.Append(lines[0]);
+        for (int i = 1; i < lines.Length; i++)
+        {
+            sb.Append('\n');
+            sb.Append(indent);
+            sb.Append(lines[i]);
+        }
+        return sb.ToString();
+    }
+
+    private static string? GetJsDocComment(ISymbol? symbol)
+    {
+        if (symbol == null) return null;
+        var xml = symbol.GetDocumentationCommentXml(expandIncludes: true, cancellationToken: default);
+        if (string.IsNullOrWhiteSpace(xml)) return null;
+
+        try
+        {
+            var doc = XDocument.Parse(xml);
+            var member = doc.Root;
+            if (member == null) return null;
+
+            var summaryLines = ExtractDocumentationLines(member.Element("summary"));
+            var remarksLines = ExtractDocumentationLines(member.Element("remarks"));
+
+            var combined = new List<string>();
+            combined.AddRange(summaryLines);
+            if (combined.Count > 0 && remarksLines.Count > 0)
+            {
+                combined.Add(string.Empty);
+            }
+            combined.AddRange(remarksLines);
+
+            if (combined.Count == 0) return null;
+
+            var sb = new StringBuilder();
+            sb.AppendLine("/**");
+            foreach (var line in combined)
+            {
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    sb.AppendLine(" *");
+                }
+                else
+                {
+                    sb.AppendLine($" * {line}");
+                }
+            }
+            sb.Append(" */");
+            return sb.ToString();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static List<string> ExtractDocumentationLines(XElement? element)
+    {
+        if (element == null) return new List<string>();
+
+        var text = element.Value;
+        if (string.IsNullOrWhiteSpace(text)) return new List<string>();
+
+        return text.Replace("\r", string.Empty)
+            .Split('\n')
+            .Select(l => l.Trim())
+            .Where(l => !string.IsNullOrEmpty(l))
+            .ToList();
+    }
+
+    private static string IndentJsDoc(string jsDoc, string indent)
+    {
+        var normalized = jsDoc.Replace("\r\n", "\n");
+        var lines = normalized.Split('\n');
+        var sb = new StringBuilder();
+        for (int i = 0; i < lines.Length; i++)
+        {
+            sb.Append(indent);
+            sb.Append(lines[i]);
+            if (i < lines.Length - 1)
+            {
+                sb.Append('\n');
+            }
+        }
+        return sb.ToString();
     }
 }
