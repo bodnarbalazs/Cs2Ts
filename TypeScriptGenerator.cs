@@ -29,13 +29,45 @@ internal static class TypeScriptGenerator
         { "object", "unknown" }
     };
 
-    // Track imports needed for each file
-    private static readonly Dictionary<string, HashSet<string>> ImportsNeeded = new();
-    // Track React imports needed for each file
-    private static readonly Dictionary<string, HashSet<string>> ReactImportsNeeded = new();
+    [Flags]
+    private enum ImportUsage
+    {
+        None = 0,
+        Type = 1,
+        Value = 2
+    }
+
+    // Track imports needed for each file (type-only vs value usage)
+    private static readonly Dictionary<string, Dictionary<string, ImportUsage>> ImportsNeeded = new();
+    // Track React imports needed for each file (type-only vs value usage)
+    private static readonly Dictionary<string, Dictionary<string, ImportUsage>> ReactImportsNeeded = new();
     // Map type name -> relative path (without extension) where it is declared
     private static readonly Dictionary<string, string> TypeDeclarationPaths = new();
     private static readonly TextInfo InvariantTextInfo = CultureInfo.InvariantCulture.TextInfo;
+
+    private static void MarkImport(Dictionary<string, Dictionary<string, ImportUsage>> store, string fileKey, string symbolName, ImportUsage usage)
+    {
+        if (!store.TryGetValue(fileKey, out var perFile))
+        {
+            perFile = new Dictionary<string, ImportUsage>(StringComparer.Ordinal);
+            store[fileKey] = perFile;
+        }
+
+        if (perFile.TryGetValue(symbolName, out var existing))
+        {
+            perFile[symbolName] = existing | usage;
+        }
+        else
+        {
+            perFile[symbolName] = usage;
+        }
+    }
+
+    private static void MarkLocalImport(string fileKey, string typeName, ImportUsage usage) =>
+        MarkImport(ImportsNeeded, fileKey, typeName, usage);
+
+    private static void MarkReactImport(string fileKey, string symbolName, ImportUsage usage) =>
+        MarkImport(ReactImportsNeeded, fileKey, symbolName, usage);
     
     // Allows program to register all type names and their output paths before generation
     public static void RegisterType(string typeName, string relativePath)
@@ -49,8 +81,8 @@ internal static class TypeScriptGenerator
     {
         // Clear imports for this file
         var fileKey = relativePath.Replace('\\','/');
-        ImportsNeeded[fileKey] = new HashSet<string>();
-        ReactImportsNeeded[fileKey] = new HashSet<string>();
+        ImportsNeeded[fileKey] = new Dictionary<string, ImportUsage>(StringComparer.Ordinal);
+        ReactImportsNeeded[fileKey] = new Dictionary<string, ImportUsage>(StringComparer.Ordinal);
         
         var result = node switch
         {
@@ -60,7 +92,7 @@ internal static class TypeScriptGenerator
             RecordDeclarationSyntax rec => GenerateInterface(rec, fileKey, semanticModel),
             StructDeclarationSyntax st => GenerateInterface(st, fileKey, semanticModel),
             InterfaceDeclarationSyntax iface => GenerateInterface(iface, fileKey, semanticModel),
-            EnumDeclarationSyntax @enum => GenerateEnum(@enum),
+            EnumDeclarationSyntax @enum => GenerateEnum(@enum, semanticModel),
             _ => string.Empty
         };
 
@@ -71,10 +103,13 @@ internal static class TypeScriptGenerator
         if (ImportsNeeded[fileKey].Count > 0)
         {
             var importSb = new StringBuilder();
-            foreach (var import in ImportsNeeded[fileKey])
+            foreach (var import in ImportsNeeded[fileKey].OrderBy(kvp => kvp.Key, StringComparer.Ordinal))
             {
-                var importPath = BuildRelativeImportPath(fileKey, import);
-                importSb.AppendLine($"import {{ {import} }} from '{importPath}';");
+                var importName = import.Key;
+                var importPath = BuildRelativeImportPath(fileKey, importName);
+                var usage = import.Value;
+                var importKeyword = (usage & ImportUsage.Value) != 0 ? "import" : "import type";
+                importSb.AppendLine($"{importKeyword} {{ {importName} }} from '{importPath}';");
             }
             importSb.AppendLine();
             result = importSb.ToString() + result;
@@ -84,9 +119,12 @@ internal static class TypeScriptGenerator
         if (ReactImportsNeeded[fileKey].Count > 0)
         {
             var reactImportSb = new StringBuilder();
-            foreach (var import in ReactImportsNeeded[fileKey])
+            foreach (var import in ReactImportsNeeded[fileKey].OrderBy(kvp => kvp.Key, StringComparer.Ordinal))
             {
-                reactImportSb.AppendLine($"import {{ {import} }} from 'react';");
+                var importName = import.Key;
+                var usage = import.Value;
+                var importKeyword = (usage & ImportUsage.Value) != 0 ? "import" : "import type";
+                reactImportSb.AppendLine($"{importKeyword} {{ {importName} }} from 'react';");
             }
             reactImportSb.AppendLine();
             result = reactImportSb.ToString() + result;
@@ -181,7 +219,7 @@ internal static class TypeScriptGenerator
                 baseTypeNames.Add(typeName);
                 
                 // Add import for base type
-                ImportsNeeded[fileKey].Add(typeName);
+                MarkLocalImport(fileKey, typeName, ImportUsage.Type);
             }
             
             inheritance = $" extends {string.Join(", ", baseTypeNames)}";
@@ -216,7 +254,7 @@ internal static class TypeScriptGenerator
 
             if (constantExpression != null)
             {
-                string? literalType = TryGetLiteralType(constantExpression, fileKey, semanticModel);
+                string? literalType = TryGetLiteralTypeTs(constantExpression, fileKey, semanticModel);
                 if (literalType != null)
                 {
                     typeTs = literalType;
@@ -236,7 +274,7 @@ internal static class TypeScriptGenerator
             if (hasReactNodeAttribute)
             {
                 typeTs = "ReactNode";
-                ReactImportsNeeded[fileKey].Add("ReactNode");
+                MarkReactImport(fileKey, "ReactNode", ImportUsage.Type);
             }
             else if (hasHtmlElementAttribute)
             {
@@ -280,16 +318,43 @@ internal static class TypeScriptGenerator
         return baseTypes;
     }
 
-    private static string GenerateEnum(EnumDeclarationSyntax en)
+    private static string GenerateEnum(EnumDeclarationSyntax en, SemanticModel semanticModel)
     {
         var sb = new StringBuilder();
-        sb.AppendLine($"export enum {en.Identifier.Text} {{");
+
+        var enumName = en.Identifier.Text;
+        sb.AppendLine($"export const {enumName} = {{");
+
         foreach (var member in en.Members)
         {
-            var value = member.EqualsValue != null ? " = " + member.EqualsValue.Value.ToString() : string.Empty;
-            sb.AppendLine($"  {member.Identifier.Text}{value},");
+            var memberName = member.Identifier.Text;
+            var key = IsValidTsIdentifier(memberName) ? memberName : QuoteString(memberName);
+
+            var fieldSymbol = semanticModel.GetDeclaredSymbol(member) as IFieldSymbol;
+            var constValue = fieldSymbol?.ConstantValue;
+            var valueText = FormatEnumValue(constValue) ?? (member.EqualsValue != null ? member.EqualsValue.Value.ToString() : "0");
+
+            sb.AppendLine($"  {key}: {valueText},");
         }
-        sb.AppendLine("}");
+
+        sb.AppendLine("} as const;");
+        sb.AppendLine();
+        sb.AppendLine($"export type {enumName} = (typeof {enumName})[keyof typeof {enumName}];");
+        sb.AppendLine();
+        sb.AppendLine($"export const {enumName}Name = {{");
+
+        foreach (var member in en.Members)
+        {
+            var memberName = member.Identifier.Text;
+            var fieldSymbol = semanticModel.GetDeclaredSymbol(member) as IFieldSymbol;
+            var constValue = fieldSymbol?.ConstantValue;
+            var valueText = FormatEnumValue(constValue) ?? (member.EqualsValue != null ? member.EqualsValue.Value.ToString() : "0");
+
+            var key = FormatEnumReverseMapKey(valueText);
+            sb.AppendLine($"  {key}: {QuoteString(memberName)},");
+        }
+
+        sb.AppendLine($"}} as const satisfies Record<{enumName}, keyof typeof {enumName}>;");
         return sb.ToString();
     }
 
@@ -393,7 +458,7 @@ internal static class TypeScriptGenerator
         else if (!typeString.Contains('.') && char.IsUpper(typeString[0]))
         {
             // Add to imports if it's a custom type (starts with uppercase and not a primitive)
-            ImportsNeeded[fileKey].Add(typeString);
+            MarkLocalImport(fileKey, typeString, ImportUsage.Type);
         }
 
         if (isArray) typeString += "[]";
@@ -465,7 +530,7 @@ internal static class TypeScriptGenerator
         return rel;
     }
 
-    private static string? TryGetLiteralType(ExpressionSyntax expression, string fileKey, SemanticModel semanticModel)
+    private static string? TryGetLiteralTypeTs(ExpressionSyntax expression, string fileKey, SemanticModel semanticModel)
     {
         if (expression is MemberAccessExpressionSyntax memberAccess) // e.g., MyEnum.Value
         {
@@ -477,9 +542,10 @@ internal static class TypeScriptGenerator
 
                 if (TypeDeclarationPaths.ContainsKey(enumTypeName))
                 {
-                    ImportsNeeded[fileKey].Add(enumTypeName);
+                    // `typeof Enum.Member` needs a value import under `verbatimModuleSyntax`
+                    MarkLocalImport(fileKey, enumTypeName, ImportUsage.Value);
                 }
-                return $"{enumTypeName}.{enumMemberName}";
+                return $"typeof {enumTypeName}.{enumMemberName}";
             }
         }
         else if (expression is LiteralExpressionSyntax literal)
@@ -500,10 +566,44 @@ internal static class TypeScriptGenerator
         return null; // Not a recognized literal type
     }
 
+    private static string? TryGetLiteralExpressionTs(ExpressionSyntax expression, string fileKey, SemanticModel semanticModel)
+    {
+        if (expression is MemberAccessExpressionSyntax memberAccess) // e.g., MyEnum.Value
+        {
+            var symbolInfo = semanticModel.GetSymbolInfo(memberAccess);
+            if (symbolInfo.Symbol is IFieldSymbol fieldSymbol && fieldSymbol.ContainingType.TypeKind == TypeKind.Enum)
+            {
+                var enumTypeName = fieldSymbol.ContainingType.Name;
+                var enumMemberName = fieldSymbol.Name;
+
+                if (TypeDeclarationPaths.ContainsKey(enumTypeName))
+                {
+                    MarkLocalImport(fileKey, enumTypeName, ImportUsage.Value);
+                }
+                return $"{enumTypeName}.{enumMemberName}";
+            }
+        }
+        else if (expression is LiteralExpressionSyntax literal)
+        {
+            switch (literal.Kind())
+            {
+                case SyntaxKind.StringLiteralExpression:
+                    return literal.Token.Text;
+                case SyntaxKind.NumericLiteralExpression:
+                    return literal.Token.Text;
+                case SyntaxKind.TrueLiteralExpression:
+                    return "true";
+                case SyntaxKind.FalseLiteralExpression:
+                    return "false";
+            }
+        }
+        return null;
+    }
+
     private static string? TryTranslateExpressionToTs(ExpressionSyntax expression, string fileKey, SemanticModel semanticModel)
     {
         // Enum member or literal
-        var literal = TryGetLiteralType(expression, fileKey, semanticModel);
+        var literal = TryGetLiteralExpressionTs(expression, fileKey, semanticModel);
         if (literal != null)
             return literal;
 
@@ -584,6 +684,53 @@ internal static class TypeScriptGenerator
         }
 
         return null; // unsupported expression
+    }
+
+    private static bool IsValidTsIdentifier(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+        if (!(char.IsLetter(name[0]) || name[0] == '_' || name[0] == '$')) return false;
+        for (int i = 1; i < name.Length; i++)
+        {
+            var c = name[i];
+            if (!(char.IsLetterOrDigit(c) || c == '_' || c == '$')) return false;
+        }
+
+        // Minimal keyword set (common TS/JS reserved words)
+        return name is not ("default" or "class" or "function" or "var" or "let" or "const" or "enum" or "export" or "import" or "extends" or "implements" or "interface" or "new" or "return" or "switch" or "case" or "throw");
+    }
+
+    private static string QuoteString(string value)
+    {
+        var escaped = value.Replace("\\", "\\\\").Replace("'", "\\'");
+        return $"'{escaped}'";
+    }
+
+    private static string? FormatEnumValue(object? constantValue)
+    {
+        if (constantValue == null) return null;
+        return constantValue switch
+        {
+            sbyte v => v.ToString(CultureInfo.InvariantCulture),
+            byte v => v.ToString(CultureInfo.InvariantCulture),
+            short v => v.ToString(CultureInfo.InvariantCulture),
+            ushort v => v.ToString(CultureInfo.InvariantCulture),
+            int v => v.ToString(CultureInfo.InvariantCulture),
+            uint v => v.ToString(CultureInfo.InvariantCulture),
+            long v => v.ToString(CultureInfo.InvariantCulture),
+            ulong v => v.ToString(CultureInfo.InvariantCulture),
+            _ => Convert.ToString(constantValue, CultureInfo.InvariantCulture)
+        };
+    }
+
+    private static string FormatEnumReverseMapKey(string valueText)
+    {
+        // Prefer numeric literal keys when possible, but handle negatives with computed property.
+        if (valueText.StartsWith("-", StringComparison.Ordinal))
+        {
+            return $"[{valueText}]";
+        }
+        return valueText;
     }
 
     private static string? TranslateObjectCreation(BaseObjectCreationExpressionSyntax objectCreation, string fileKey, SemanticModel semanticModel)

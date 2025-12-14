@@ -30,10 +30,19 @@ public class TestModel
     
     [HtmlElement]
     public object? DomElement { get; set; }
+
+    // Test type-only imports (should generate `import type`)
+    public OtherModel? Other { get; set; }
+
+    // Test enum literal type emission (should generate `typeof UiColor.Black`)
+    public UiColor DefaultColorLiteral => UiColor.Black;
     
     // Test nullable function types
     public Action? NullableAction { get; set; }
     public Func<string>? NullableFunc { get; set; }
+
+    // Test value usage of enum (should generate a non-type-only import)
+    public static readonly UiColor DefaultColor = UiColor.Black;
 }
 
 /// <summary>
