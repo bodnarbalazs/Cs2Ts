@@ -25,6 +25,10 @@ internal static class TypeScriptGenerator
         { "decimal", "number" },
         { "bool", "boolean" },
         { "DateTime", "Date" },
+        { "DateTimeOffset", "string" },
+        { "System.DateTimeOffset", "string" },
+        { "TimeSpan", "number" },
+        { "System.TimeSpan", "number" },
         { "Guid", "string" },
         { "object", "unknown" }
     };
@@ -44,6 +48,16 @@ internal static class TypeScriptGenerator
     // Map type name -> relative path (without extension) where it is declared
     private static readonly Dictionary<string, string> TypeDeclarationPaths = new();
     private static readonly TextInfo InvariantTextInfo = CultureInfo.InvariantCulture.TextInfo;
+
+    // Type hints to carry expected wire-format metadata into generated TS without performing any runtime translation.
+    // Keyed by the unqualified CLR type name (and sometimes qualified, depending on how syntax is written).
+    private static readonly Dictionary<string, string> TypeFormatHints = new(StringComparer.Ordinal)
+    {
+        { "DateTimeOffset", "ISO-8601 date-time string" },
+        { "System.DateTimeOffset", "ISO-8601 date-time string" },
+        { "TimeSpan", "Duration in milliseconds" },
+        { "System.TimeSpan", "Duration in milliseconds" }
+    };
 
     private static void MarkImport(Dictionary<string, Dictionary<string, ImportUsage>> store, string fileKey, string symbolName, ImportUsage usage)
     {
@@ -283,9 +297,11 @@ internal static class TypeScriptGenerator
 
             var propertySymbol = semanticModel.GetDeclaredSymbol(prop);
             var propertyDocComment = GetJsDocComment(propertySymbol);
-            if (!string.IsNullOrWhiteSpace(propertyDocComment))
+            var hintLines = GetTypeHintLines(prop.Type);
+            var mergedDoc = MergeJsDoc(propertyDocComment, hintLines);
+            if (!string.IsNullOrWhiteSpace(mergedDoc))
             {
-                sb.AppendLine(IndentJsDoc(propertyDocComment, "  "));
+                sb.AppendLine(IndentJsDoc(mergedDoc, "  "));
             }
             
             sb.AppendLine($"  {name}: {typeTs};");
@@ -916,5 +932,121 @@ internal static class TypeScriptGenerator
             }
         }
         return sb.ToString();
+    }
+
+    private static List<string> GetTypeHintLines(TypeSyntax typeSyntax)
+    {
+        var lines = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        CollectTypeHintLines(typeSyntax, lines, seen);
+        return lines;
+    }
+
+    private static void CollectTypeHintLines(TypeSyntax typeSyntax, List<string> lines, HashSet<string> seen)
+    {
+        // Unwrap nullable
+        if (typeSyntax is NullableTypeSyntax nts)
+        {
+            CollectTypeHintLines(nts.ElementType, lines, seen);
+            return;
+        }
+
+        // Handle array types
+        if (typeSyntax is ArrayTypeSyntax ats)
+        {
+            CollectTypeHintLines(ats.ElementType, lines, seen);
+            return;
+        }
+
+        // Handle generics: recurse into type arguments
+        if (typeSyntax is GenericNameSyntax gns)
+        {
+            foreach (var arg in gns.TypeArgumentList.Arguments)
+            {
+                CollectTypeHintLines(arg, lines, seen);
+            }
+            return;
+        }
+
+        // Qualified generic name: e.g. System.Collections.Generic.List<TimeSpan>
+        if (typeSyntax is QualifiedNameSyntax qns && qns.Right is GenericNameSyntax rightGeneric)
+        {
+            foreach (var arg in rightGeneric.TypeArgumentList.Arguments)
+            {
+                CollectTypeHintLines(arg, lines, seen);
+            }
+            // Also allow matching on the fully qualified name itself.
+            TryAddTypeHint(qns.ToString(), lines, seen);
+            TryAddTypeHint(qns.Right.Identifier.Text, lines, seen);
+            return;
+        }
+
+        // Qualified non-generic: e.g. System.DateTimeOffset
+        if (typeSyntax is QualifiedNameSyntax qnsNonGeneric)
+        {
+            TryAddTypeHint(qnsNonGeneric.ToString(), lines, seen);
+            TryAddTypeHint(qnsNonGeneric.Right.Identifier.Text, lines, seen);
+            return;
+        }
+
+        // Identifier: e.g. DateTimeOffset, TimeSpan
+        if (typeSyntax is IdentifierNameSyntax ins)
+        {
+            TryAddTypeHint(ins.Identifier.Text, lines, seen);
+            return;
+        }
+
+        // Fallback: attempt match on string form (covers some parsed generic cases)
+        TryAddTypeHint(typeSyntax.ToString(), lines, seen);
+    }
+
+    private static void TryAddTypeHint(string typeName, List<string> lines, HashSet<string> seen)
+    {
+        if (TypeFormatHints.TryGetValue(typeName, out var hint) && seen.Add(hint))
+        {
+            lines.Add(hint);
+        }
+    }
+
+    private static string? MergeJsDoc(string? existingJsDoc, List<string> extraLines)
+    {
+        if (extraLines.Count == 0)
+        {
+            return existingJsDoc;
+        }
+
+        if (string.IsNullOrWhiteSpace(existingJsDoc))
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("/**");
+            foreach (var line in extraLines)
+            {
+                sb.AppendLine($" * {line}");
+            }
+            sb.Append(" */");
+            return sb.ToString();
+        }
+
+        var normalized = existingJsDoc.Replace("\r\n", "\n");
+        var lines = normalized.Split('\n').ToList();
+
+        // Insert before the closing */ (best-effort).
+        var closeIndex = lines.FindLastIndex(l => l.TrimEnd().EndsWith("*/", StringComparison.Ordinal));
+        if (closeIndex < 0) closeIndex = lines.Count;
+
+        // Add a blank line separator if this doc already has content beyond the opening line.
+        if (closeIndex > 1)
+        {
+            lines.Insert(closeIndex, " *");
+            closeIndex++;
+        }
+
+        foreach (var extra in extraLines)
+        {
+            lines.Insert(closeIndex, $" * {extra}");
+            closeIndex++;
+        }
+
+        return string.Join("\n", lines);
     }
 }

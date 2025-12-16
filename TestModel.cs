@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace Cs2Ts;
 
@@ -15,6 +16,12 @@ public class TestModel
     public int Age { get; set; }
     public DateTime? BirthDate { get; set; }
     public bool? IsActive { get; set; }
+
+    // Date/time and duration formats (type-only metadata; serialization is handled elsewhere)
+    public DateTimeOffset? CreatedAt { get; set; }
+    public TimeSpan? ProcessingTime { get; set; }
+    public List<TimeSpan>? RetryDelays { get; set; }
+    public DateTimeOffset[]? History { get; set; }
     
     // Test Action and Func types
     public Action? SimpleAction { get; set; }

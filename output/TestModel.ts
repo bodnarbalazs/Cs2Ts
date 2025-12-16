@@ -16,6 +16,22 @@ export interface TestModel {
   age: number;
   birthDate: Date | null;
   isActive: boolean | null;
+  /**
+   * ISO-8601 date-time string
+   */
+  createdAt: string | null;
+  /**
+   * Duration in milliseconds
+   */
+  processingTime: number | null;
+  /**
+   * Duration in milliseconds
+   */
+  retryDelays: number[] | null;
+  /**
+   * ISO-8601 date-time string
+   */
+  history: string[] | null;
   simpleAction: () => void | null;
   actionWithParam: (arg: string) => void | null;
   actionWithTwoParams: (arg1: string, arg2: number) => void | null;
