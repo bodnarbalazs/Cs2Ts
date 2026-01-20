@@ -27,6 +27,8 @@ internal static class TypeScriptGenerator
         { "DateTime", "Date" },
         { "DateTimeOffset", "string" },
         { "System.DateTimeOffset", "string" },
+        { "DateOnly", "string" },
+        { "System.DateOnly", "string" },
         { "TimeSpan", "number" },
         { "System.TimeSpan", "number" },
         { "Guid", "string" },
