@@ -8,7 +8,7 @@
         <PackAsTool>true</PackAsTool>
         <ToolCommandName>cs2ts</ToolCommandName>
         <PackageOutputPath>./nupkg</PackageOutputPath>
-        <Version>1.2.0</Version>
+        <Version>1.2.1</Version>
         <Title>Cs2Ts</Title>
         <Description>A tool to convert C# classes to TypeScript types</Description>
         <Authors>Balázs Bodnár</Authors>
