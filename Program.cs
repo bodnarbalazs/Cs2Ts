@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Threading.Tasks;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -13,9 +14,21 @@ class Program
 {
     static async Task Main(string[] args)
     {
+        if (args.Length == 1 && args[0] is "--version" or "-v")
+        {
+            Console.WriteLine(GetVersion());
+            return;
+        }
+
+        if (args.Length == 0 || (args.Length == 1 && args[0] is "--help" or "-h" or "-?"))
+        {
+            PrintHelp();
+            return;
+        }
+
         if (args.Length != 1)
         {
-            Console.WriteLine("Usage: Cs2Ts <outputFolder>");
+            PrintHelp();
             return;
         }
 
@@ -122,6 +135,41 @@ class Program
         // await Task.WhenAll(tasks); // If using tasks, ensure proper management
         Console.WriteLine("TypeScript generation completed successfully.");
         CleanEmptyDirectories(outputRoot);
+    }
+
+    static string GetVersion()
+    {
+        var version = typeof(Program).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+            ?.InformationalVersion ?? "unknown";
+        var plusIndex = version.IndexOf('+');
+        if (plusIndex >= 0)
+            version = version[..plusIndex];
+        return version;
+    }
+
+    static void PrintHelp()
+    {
+        Console.WriteLine($"Cs2Ts v{GetVersion()} - C# to TypeScript converter");
+        Console.WriteLine();
+        Console.WriteLine("Converts C# classes, records, structs, interfaces, and enums marked with");
+        Console.WriteLine("[ConvertToTs] into TypeScript type definitions.");
+        Console.WriteLine();
+        Console.WriteLine("Usage:");
+        Console.WriteLine("  cs2ts <outputFolder>    Generate TypeScript files into the specified folder");
+        Console.WriteLine("  cs2ts --help            Show this help message");
+        Console.WriteLine("  cs2ts --version         Show the version number");
+        Console.WriteLine();
+        Console.WriteLine("Arguments:");
+        Console.WriteLine("  <outputFolder>          Path where .ts files will be written.");
+        Console.WriteLine("                          Existing .ts files in this directory will be deleted.");
+        Console.WriteLine();
+        Console.WriteLine("Flags:");
+        Console.WriteLine("  -h, --help              Show this help message");
+        Console.WriteLine("  -v, --version           Show the version number");
+        Console.WriteLine();
+        Console.WriteLine("The tool scans all .cs files in the current directory (excluding bin/obj)");
+        Console.WriteLine("and generates TypeScript for types decorated with [ConvertToTs].");
     }
 
     static bool HasConvertToTsAttribute(SyntaxList<AttributeListSyntax> lists)

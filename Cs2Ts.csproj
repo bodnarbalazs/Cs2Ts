@@ -8,14 +8,25 @@
         <PackAsTool>true</PackAsTool>
         <ToolCommandName>cs2ts</ToolCommandName>
         <PackageOutputPath>./nupkg</PackageOutputPath>
-        <Version>1.1.0</Version>
+        <Version>1.2.0</Version>
         <Title>Cs2Ts</Title>
         <Description>A tool to convert C# classes to TypeScript types</Description>
         <Authors>Balázs Bodnár</Authors>
+        <PackageId>Cs2Ts</PackageId>
+        <PackageReadmeFile>ReadMe.md</PackageReadmeFile>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
+        <RepositoryUrl>https://github.com/bodnarbalazs/Cs2Ts</RepositoryUrl>
+        <RepositoryType>git</RepositoryType>
+        <PackageTags>csharp;typescript;codegen;dotnet-tool;converter</PackageTags>
+        <PackageProjectUrl>https://github.com/bodnarbalazs/Cs2Ts</PackageProjectUrl>
     </PropertyGroup>
 
     <ItemGroup>
         <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.8.0" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <None Include="ReadMe.md" Pack="true" PackagePath="\" />
     </ItemGroup>
 
 </Project>
