@@ -5,7 +5,7 @@ A .NET CLI tool that converts C# classes, records, structs, interfaces, and enum
 ## Installation
 
 ```bash
-dotnet tool install --global Cs2Ts
+dotnet tool install --global Balazs.Cs2Ts
 ```
 
 Add the marker attribute to your project (a single empty class is all you need):

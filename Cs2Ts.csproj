@@ -8,11 +8,11 @@
         <PackAsTool>true</PackAsTool>
         <ToolCommandName>cs2ts</ToolCommandName>
         <PackageOutputPath>./nupkg</PackageOutputPath>
-        <Version>1.2.2</Version>
+        <Version>1.2.3</Version>
         <Title>Cs2Ts</Title>
         <Description>A tool to convert C# classes to TypeScript types</Description>
         <Authors>Balázs Bodnár</Authors>
-        <PackageId>Cs2Ts</PackageId>
+        <PackageId>Balazs.Cs2Ts</PackageId>
         <PackageReadmeFile>ReadMe.md</PackageReadmeFile>
         <PackageLicenseExpression>MIT</PackageLicenseExpression>
         <RepositoryUrl>https://github.com/bodnarbalazs/Cs2Ts</RepositoryUrl>
